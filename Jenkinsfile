@@ -4,20 +4,28 @@ pipeline {
     stages {
         stage('Checkout') {
             steps {
-                echo 'Jenkins is preparing the project.'
+                git branch: 'main',
+                    url: 'https://github.com/lokeshwaranc25/aws-devops-cicd-project.git'
             }
         }
 
         stage('Build') {
             steps {
-                echo 'Building the website project.'
-                echo 'Build completed successfully!'
+                echo 'Building the website project...'
+
+                bat 'dir'
             }
         }
 
         stage('Test') {
             steps {
-                echo 'Testing the website project.'
+                script {
+                    if (!fileExists('index.html')) {
+                        error 'index.html not found!'
+                    }
+                }
+
+                echo 'Website file exists. Test passed!'
             }
         }
     }
