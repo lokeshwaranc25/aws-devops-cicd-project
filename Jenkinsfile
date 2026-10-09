@@ -12,7 +12,6 @@ pipeline {
         stage('Build') {
             steps {
                 echo 'Building the website project...'
-
                 bat 'dir'
             }
         }
@@ -28,15 +27,21 @@ pipeline {
                 echo 'Website file exists. Test passed!'
             }
         }
+
+        stage('Docker Build') {
+            steps {
+                bat 'docker build -t aws-devops-website:v1 .'
+            }
+        }
     }
 
     post {
         success {
-            echo 'CI pipeline completed successfully!'
+            echo 'CI/CD pipeline completed successfully!'
         }
 
         failure {
-            echo 'CI pipeline failed. Check the logs.'
+            echo 'Pipeline failed. Check the logs.'
         }
     }
 }
