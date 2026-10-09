@@ -29,11 +29,10 @@ pipeline {
         }
 
         stage('Docker Build') {
-            steps {
-                bat 'docker build -t aws-devops-website:v1 .'
-            }
-        }
+    steps {
+        bat '"C:\\Users\\ets2h\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe" build -t aws-devops-website:v1 .'
     }
+}
 
     post {
         success {
