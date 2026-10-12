@@ -34,10 +34,6 @@ pipeline {
                         error 'Dockerfile is missing.'
                     }
 
-                    if (!fileExists('Jenkinsfile')) {
-                        error 'Jenkinsfile is missing.'
-                    }
-
                     echo 'Basic project file checks passed.'
                 }
             }
@@ -46,7 +42,7 @@ pipeline {
         stage('Docker Build') {
             steps {
                 bat '''
-                    "%DOCKER%" build -t aws-devops-website:v1 .
+                    "%DOCKER%" build -t aws-devops-website:%IMAGE_TAG% .
                     if errorlevel 1 exit /b 1
                 '''
 
@@ -99,7 +95,7 @@ pipeline {
         stage('Tag Docker Image') {
             steps {
                 bat '''
-                    "%DOCKER%" tag aws-devops-website:v1 %ECR_URI%:v1
+                    "%DOCKER%" tag aws-devops-website:%IMAGE_TAG% %ECR_URI%:%IMAGE_TAG%
                     if errorlevel 1 exit /b 1
                 '''
 
@@ -119,7 +115,7 @@ pipeline {
                     bat '''
                         set AWS_DEFAULT_REGION=%AWS_REGION%
 
-                        "%DOCKER%" push %ECR_URI%:v1
+                        "%DOCKER%" push %ECR_URI%:%IMAGE_TAG%
                         if errorlevel 1 exit /b 1
                     '''
                 }
@@ -133,12 +129,18 @@ pipeline {
                 script {
                     def commands = [
                         'set -e',
+
                         'aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 880247664825.dkr.ecr.us-east-1.amazonaws.com',
+
                         'docker pull 880247664825.dkr.ecr.us-east-1.amazonaws.com/aws-devops-website:v1',
+
                         'docker stop aws-devops-container || true',
+
                         'docker rm aws-devops-container || true',
+
                         'docker run -d --name aws-devops-container --restart unless-stopped -p 80:80 880247664825.dkr.ecr.us-east-1.amazonaws.com/aws-devops-website:v1',
-                        'curl --fail --silent --show-error http://localhost/'
+
+                        'sleep 5; for i in $(seq 1 12); do if curl --fail --silent --show-error http://127.0.0.1/ -o /dev/null; then echo "Website health check passed"; exit 0; fi; echo "Waiting for Nginx... attempt $i"; sleep 5; done; echo "Website health check failed"; exit 1'
                     ]
 
                     def parameters = groovy.json.JsonOutput.toJson([
@@ -190,7 +192,7 @@ pipeline {
 
                         timeout(time: 5, unit: 'MINUTES') {
                             waitUntil {
-                                bat(
+                                def queryResult = bat(
                                     returnStatus: true,
                                     script: """
                                         set AWS_DEFAULT_REGION=%AWS_REGION%
@@ -203,6 +205,12 @@ pipeline {
                                             --output text > ssm-status.txt
                                     """
                                 )
+
+                                if (queryResult != 0) {
+                                    echo 'Unable to retrieve SSM status yet. Retrying.'
+                                    sleep time: 5, unit: 'SECONDS'
+                                    return false
+                                }
 
                                 def deploymentStatus = readFile('ssm-status.txt').trim()
 
@@ -218,11 +226,10 @@ pipeline {
                                     'TimedOut',
                                     'Cancelling'
                                 ].contains(deploymentStatus)) {
-                                    error "EC2 deployment failed. SSM status: ${deploymentStatus}"
+                                    error "EC2 deployment failed. SSM status: ${deploymentStatus}. Command ID: ${commandId}"
                                 }
 
                                 sleep time: 5, unit: 'SECONDS'
-
                                 return false
                             }
                         }
@@ -240,7 +247,7 @@ pipeline {
         }
 
         failure {
-            echo 'FAILURE: The pipeline failed. Check the Jenkins Console Output for details.'
+            echo 'FAILURE: The pipeline failed. Check the Jenkins Console Output and SSM command output.'
         }
 
         always {
