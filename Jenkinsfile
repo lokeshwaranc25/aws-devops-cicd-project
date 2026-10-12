@@ -2,23 +2,24 @@ pipeline {
     agent any
 
     environment {
-        AWS_REGION = 'us-east-1'
-        AWS_ACCOUNT_ID = '880247664825'
-        ECR_REPOSITORY = 'aws-devops-website'
-        IMAGE_TAG = 'v1'
-
+        AWS_REGION      = 'us-east-1'
+        AWS_ACCOUNT_ID  = '880247664825'
+        ECR_REPOSITORY  = 'aws-devops-website'
+        IMAGE_TAG       = 'v1'
         EC2_INSTANCE_ID = 'i-0be007d342447ffa4'
 
+        ECR_URI = '880247664825.dkr.ecr.us-east-1.amazonaws.com/aws-devops-website'
+
         DOCKER = 'C:\\Users\\ets2h\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe'
-        AWS = 'C:\\Program Files\\Amazon\\AWSCLIV2\\aws.exe'
+        AWS    = 'C:\\Program Files\\Amazon\\AWSCLIV2\\aws.exe'
     }
 
     stages {
 
         stage('Checkout') {
             steps {
-                git branch: 'main',
-                    url: 'https://github.com/lokeshwaranc25/aws-devops-cicd-project.git'
+                checkout scm
+                echo 'Source code checked out successfully.'
             }
         }
 
@@ -26,17 +27,30 @@ pipeline {
             steps {
                 script {
                     if (!fileExists('index.html')) {
-                        error 'index.html not found!'
+                        error 'index.html is missing.'
                     }
-                }
 
-                echo 'Website test passed!'
+                    if (!fileExists('Dockerfile')) {
+                        error 'Dockerfile is missing.'
+                    }
+
+                    if (!fileExists('Jenkinsfile')) {
+                        error 'Jenkinsfile is missing.'
+                    }
+
+                    echo 'Basic project file checks passed.'
+                }
             }
         }
 
         stage('Docker Build') {
             steps {
-                bat '"%DOCKER%" build -t %ECR_REPOSITORY%:%IMAGE_TAG% .'
+                bat '''
+                    "%DOCKER%" build -t aws-devops-website:v1 .
+                    if errorlevel 1 exit /b 1
+                '''
+
+                echo 'Docker image built successfully.'
             }
         }
 
@@ -51,9 +65,13 @@ pipeline {
                 ]) {
                     bat '''
                         set AWS_DEFAULT_REGION=%AWS_REGION%
+
                         "%AWS%" sts get-caller-identity
+                        if errorlevel 1 exit /b 1
                     '''
                 }
+
+                echo 'AWS credentials verified.'
             }
         }
 
@@ -68,21 +86,72 @@ pipeline {
                 ]) {
                     bat '''
                         set AWS_DEFAULT_REGION=%AWS_REGION%
-                        "%AWS%" ecr get-login-password --region %AWS_REGION% | "%DOCKER%" login --username AWS --password-stdin %AWS_ACCOUNT_ID%.dkr.ecr.%AWS_REGION%.amazonaws.com
+
+                        "%AWS%" ecr get-login-password --region %AWS_REGION% | "%DOCKER%" login --username AWS --password-stdin %ECR_URI%
+                        if errorlevel 1 exit /b 1
                     '''
                 }
+
+                echo 'Docker logged in to Amazon ECR.'
             }
         }
 
         stage('Tag Docker Image') {
             steps {
-                bat '"%DOCKER%" tag %ECR_REPOSITORY%:%IMAGE_TAG% %AWS_ACCOUNT_ID%.dkr.ecr.%AWS_REGION%.amazonaws.com/%ECR_REPOSITORY%:%IMAGE_TAG%'
+                bat '''
+                    "%DOCKER%" tag aws-devops-website:v1 %ECR_URI%:v1
+                    if errorlevel 1 exit /b 1
+                '''
+
+                echo 'Docker image tagged for ECR.'
             }
         }
 
         stage('Push to ECR') {
             steps {
-                bat '"%DOCKER%" push %AWS_ACCOUNT_ID%.dkr.ecr.%AWS_REGION%.amazonaws.com/%ECR_REPOSITORY%:%IMAGE_TAG%'
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'aws-ecr-credentials',
+                        usernameVariable: 'AWS_ACCESS_KEY_ID',
+                        passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                    )
+                ]) {
+                    bat '''
+                        set AWS_DEFAULT_REGION=%AWS_REGION%
+
+                        "%DOCKER%" push %ECR_URI%:v1
+                        if errorlevel 1 exit /b 1
+                    '''
+                }
+
+                echo 'Docker image pushed to ECR successfully.'
+            }
+        }
+
+        stage('Prepare EC2 Deployment') {
+            steps {
+                script {
+                    def commands = [
+                        'set -e',
+                        'aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 880247664825.dkr.ecr.us-east-1.amazonaws.com',
+                        'docker pull 880247664825.dkr.ecr.us-east-1.amazonaws.com/aws-devops-website:v1',
+                        'docker stop aws-devops-container || true',
+                        'docker rm aws-devops-container || true',
+                        'docker run -d --name aws-devops-container --restart unless-stopped -p 80:80 880247664825.dkr.ecr.us-east-1.amazonaws.com/aws-devops-website:v1',
+                        'curl --fail --silent --show-error http://localhost/'
+                    ]
+
+                    def parameters = groovy.json.JsonOutput.toJson([
+                        commands: commands
+                    ])
+
+                    writeFile(
+                        file: 'ssm-parameters.json',
+                        text: parameters
+                    )
+
+                    echo 'EC2 deployment commands prepared.'
+                }
             }
         }
 
@@ -95,68 +164,70 @@ pipeline {
                         passwordVariable: 'AWS_SECRET_ACCESS_KEY'
                     )
                 ]) {
+                    bat '''
+                        set AWS_DEFAULT_REGION=%AWS_REGION%
+
+                        "%AWS%" ssm send-command ^
+                            --region %AWS_REGION% ^
+                            --instance-ids %EC2_INSTANCE_ID% ^
+                            --document-name AWS-RunShellScript ^
+                            --parameters file://ssm-parameters.json ^
+                            --comment "Deploy AWS DevOps website from Jenkins" ^
+                            --query "Command.CommandId" ^
+                            --output text > ssm-command-id.txt
+
+                        if errorlevel 1 exit /b 1
+                    '''
+
                     script {
-                        def commands = [
-                            "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com",
-                            "docker pull ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}",
-                            "docker stop aws-devops-container || true",
-                            "docker rm aws-devops-container || true",
-                            "docker run -d --name aws-devops-container --restart unless-stopped -p 80:80 ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}",
-                            "curl -f http://localhost/"
-                        ]
+                        def commandId = readFile('ssm-command-id.txt').trim()
 
-                        def commandJson = groovy.json.JsonOutput.toJson([
-                            commands: commands
-                        ])
-
-                        writeFile(
-                            file: 'ssm-parameters.json',
-                            text: groovy.json.JsonOutput.toJson([
-                                commands: commands
-                            ])
-                        )
-
-                        bat """
-                            set AWS_DEFAULT_REGION=%AWS_REGION%
-                            "%AWS%" ssm send-command ^
-                                --region %AWS_REGION% ^
-                                --instance-ids %EC2_INSTANCE_ID% ^
-                                --document-name AWS-RunShellScript ^
-                                --parameters file://ssm-parameters.json ^
-                                --comment "Deploy AWS DevOps website from Jenkins" ^
-                                --output json > ssm-command.json
-                        """
-
-                        def result = readJSON file: 'ssm-command.json'
-                        def commandId = result.Command.CommandId
-
-                        echo "SSM deployment command submitted: ${commandId}"
-
-                        sleep time: 10, unit: 'SECONDS'
-
-                        def status = bat(
-                            script: """
-                                "%AWS%" ssm get-command-invocation ^
-                                    --region %AWS_REGION% ^
-                                    --command-id ${commandId} ^
-                                    --instance-id %EC2_INSTANCE_ID% ^
-                                    --query Status ^
-                                    --output text > ssm-status.txt
-                            """,
-                            returnStatus: true
-                        )
-
-                        if (status != 0) {
-                            error 'Unable to retrieve deployment status from SSM.'
+                        if (!commandId || commandId == 'None') {
+                            error 'Failed to obtain the SSM command ID.'
                         }
 
-                        def deploymentStatus = readFile('ssm-status.txt').trim()
+                        echo "SSM command submitted: ${commandId}"
 
-                        if (deploymentStatus != 'Success') {
-                            error "Deployment did not succeed. SSM status: ${deploymentStatus}. Check the AWS Systems Manager command output."
+                        timeout(time: 5, unit: 'MINUTES') {
+                            waitUntil {
+                                bat(
+                                    returnStatus: true,
+                                    script: """
+                                        set AWS_DEFAULT_REGION=%AWS_REGION%
+
+                                        "%AWS%" ssm get-command-invocation ^
+                                            --region %AWS_REGION% ^
+                                            --command-id ${commandId} ^
+                                            --instance-id %EC2_INSTANCE_ID% ^
+                                            --query Status ^
+                                            --output text > ssm-status.txt
+                                    """
+                                )
+
+                                def deploymentStatus = readFile('ssm-status.txt').trim()
+
+                                echo "Current deployment status: ${deploymentStatus}"
+
+                                if (deploymentStatus == 'Success') {
+                                    return true
+                                }
+
+                                if ([
+                                    'Failed',
+                                    'Cancelled',
+                                    'TimedOut',
+                                    'Cancelling'
+                                ].contains(deploymentStatus)) {
+                                    error "EC2 deployment failed. SSM status: ${deploymentStatus}"
+                                }
+
+                                sleep time: 5, unit: 'SECONDS'
+
+                                return false
+                            }
                         }
 
-                        echo 'EC2 deployment completed successfully!'
+                        echo 'EC2 deployment completed successfully.'
                     }
                 }
             }
@@ -165,11 +236,15 @@ pipeline {
 
     post {
         success {
-            echo 'SUCCESS: Docker image built, pushed to ECR, and EC2 deployment completed!'
+            echo 'SUCCESS: CI/CD pipeline completed. The website has been deployed to EC2.'
         }
 
         failure {
-            echo 'FAILED: Check the Jenkins Console Output to identify the failed stage.'
+            echo 'FAILURE: The pipeline failed. Check the Jenkins Console Output for details.'
+        }
+
+        always {
+            echo 'Pipeline execution finished.'
         }
     }
 }
